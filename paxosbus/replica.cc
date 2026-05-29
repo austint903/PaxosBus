@@ -74,12 +74,10 @@ PaxosBusReplica::HandleData(const TransportAddress &remote,
     int64_t actual_ns   = (int64_t)NowNs();
     int64_t expected_ns = state.base_recv_ns + (int64_t)((msg.seq_num() - 1) * state.interval_ns);
     int64_t delta_us    = (actual_ns - expected_ns) / 1000;
-    const char *timing_label = (delta_us > 0) ? "late" : (delta_us < 0) ? "early" : "on-time";
-
     Notice("[Replica %d] seq=%" PRIu64 " from client %" PRIu64
-           "  delta=%+" PRId64 "us (%s)  view=%" PRIu64 "  slot=%" PRIu64 "  replying",
+           "  delta=%+" PRId64 "us  view=%" PRIu64 "  slot=%" PRIu64 "  replying",
            replicaIdx, msg.seq_num(), msg.client_id(),
-           delta_us, timing_label, view_id_, msg.seq_num());
+           delta_us, view_id_, msg.seq_num());
 
     state.next_seq = msg.seq_num() + 1;
 
