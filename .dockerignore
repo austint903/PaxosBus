@@ -1,0 +1,7 @@
+.obj/
+config/*.conf
+CLAUDE.md
+*.md
+bench/client
+bench/replica
+sequencer/sequencer
