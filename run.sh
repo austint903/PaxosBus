@@ -101,7 +101,7 @@ docker network rm "$NETWORK" &>/dev/null || true
 
 docker network create --subnet="$SUBNET" "$NETWORK" > /dev/null
 
-#start sequencer
+#start sequencer, starts  172.28.0.2
 if [[ $PROTOCOL == nopaxos ]]; then
     docker run -d \
         --name nopaxos-sequencer \
@@ -115,7 +115,7 @@ if [[ $PROTOCOL == nopaxos ]]; then
     CONTAINERS+=(nopaxos-sequencer)
 fi
 
-#start replicas
+#start replicas, replica 0 starts at 172.28.0.10
 for i in $(seq 0 $((REPLICAS - 1))); do
     NAME="nopaxos-replica-$i"
     IP="172.28.0.$((BASE_REPLICA_IP_THIRD_OCTET + i))"
@@ -133,7 +133,7 @@ done
 
 sleep 3
 
-#run client
+#run client, starts at 172.28.0.100
 echo "+ running client ($REQUESTS requests)"
 docker run --rm \
     --name nopaxos-client \
