@@ -87,6 +87,7 @@ private:
     Configuration *config;
     int sockfd;
     struct sockaddr_ll destSockAddr;
+    uint8_t myMacAddr[ETH_ALEN];
 
     bool ProcessPacket(uint8_t *packet, size_t len);
 };

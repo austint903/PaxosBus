@@ -552,7 +552,7 @@ UDPTransport::OrderedMulticast(TransportReceiver *src,
     size_t meta_len = sizeof(uint16_t) + sizeof(sessnum_t) + sizeof(uint32_t) +
         groups.size() * (sizeof(shardnum_t) + sizeof(msgnum_t));
 
-    void *meta_data = malloc(meta_len);
+    void *meta_data = calloc(1, meta_len);
     char *ptr = (char *)meta_data;
     // udp src port (filled by sequencer)
     ptr += sizeof(uint16_t);

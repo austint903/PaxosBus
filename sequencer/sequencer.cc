@@ -122,6 +122,14 @@ Transport::Transport(Sequencer *sequencer, Configuration *config)
         Panic("Failed to set ioctl option SIOCGIFINDEX");
     }
 
+    struct ifreq ifhw;
+    memset(&ifhw, 0, sizeof(ifhw));
+    strncpy(ifhw.ifr_name, config->GetInterface().c_str(), IFNAMSIZ-1);
+    if (ioctl(this->sockfd, SIOCGIFHWADDR, &ifhw) < 0) {
+        Panic("Failed to get interface MAC address");
+    }
+    memcpy(this->myMacAddr, ifhw.ifr_hwaddr.sa_data, ETH_ALEN);
+
     if (setsockopt(this->sockfd, SOL_SOCKET, SO_REUSEADDR, &sockopt, sizeof(sockopt)) == -1) {
         Panic("Failed to set socket option SO_REUSEADDR");
     }
@@ -135,6 +143,8 @@ Transport::Transport(Sequencer *sequencer, Configuration *config)
     }
 
     /* Sequencer sends out packets using multicast */
+    bzero(&this->destSockAddr, sizeof(this->destSockAddr));
+    this->destSockAddr.sll_family = AF_PACKET;
     this->destSockAddr.sll_ifindex = ifopts.ifr_ifindex;
     this->destSockAddr.sll_halen = ETH_ALEN;
     for (int i = 0; i < ETH_ALEN; i++) {
@@ -257,6 +267,9 @@ Transport::ProcessPacket(uint8_t *packet, size_t len)
      */
     udph->source = htons(group_bitmap);
     udph->check = 0; // disable udp checksum
+
+    memcpy(eh->ether_shost, this->myMacAddr, ETH_ALEN);
+
     return true;
 }
 
