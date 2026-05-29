@@ -1,0 +1,26 @@
+package paxosbus.proto;
+
+// Phase 1: clock sync – sent once per client at startup
+message SyncMessage {
+    required uint64 client_id       = 1;
+    required uint64 send_time_ns    = 2;
+    required uint64 interval_ms     = 3;
+    required uint64 start_delay_ms  = 4;  // ms from sync send until first data send
+}
+
+// Phase 2: periodic data delivery
+message DataMessage {
+    required uint64 client_id    = 1;
+    required uint64 seq_num      = 2;
+    required uint64 send_time_ns = 3;
+    required bytes  payload      = 4;
+}
+
+// Phase 2: replica acknowledgement of a DataMessage (unicast back to client)
+message DataReplyMessage {
+    required uint64 client_id    = 1;
+    required uint64 seq_num      = 2;
+    required uint64 view_id      = 3;
+    required uint64 log_slot_num = 4;
+    required uint32 replica_idx  = 5;
+}

@@ -138,6 +138,7 @@ include vr/Rules.mk
 include fastpaxos/Rules.mk
 include spec/Rules.mk
 include nopaxos/Rules.mk
+include paxosbus/Rules.mk
 include bench/Rules.mk
 include sequencer/Rules.mk
 
