@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ── Message rate and topology ───────────────────────────────────────────────
-MSG_INTERVAL_MS=1000   # change this: 1000=1s  100=100ms  10=10ms  2=2ms
+MSG_INTERVAL_MS=1      # change this: 1000=1s  100=100ms  10=10ms  2=2ms  1=1ms
 NUM_REPLICAS=3
 NUM_CLIENTS=2
 # ────────────────────────────────────────────────────────────────────────────

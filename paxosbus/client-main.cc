@@ -14,7 +14,7 @@ Usage(const char *prog)
             "usage: %s -c <config-file> -I <client-id> [-p <interval-ms>]\n"
             "  -c  path to replica config file\n"
             "  -I  client ID (positive integer, unique per client)\n"
-            "  -p  message interval in milliseconds (default: 1000)\n",
+            "  -p  message interval in milliseconds (default: 1)\n",
             prog);
     exit(1);
 }
@@ -24,7 +24,7 @@ main(int argc, char **argv)
 {
     const char *configPath = nullptr;
     uint64_t clientid    = 0;
-    uint64_t interval_ms = 1000;
+    uint64_t interval_ms = 1;
 
     int opt;
     while ((opt = getopt(argc, argv, "c:I:p:")) != -1) {
