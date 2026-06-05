@@ -69,6 +69,10 @@ PaxosBusClient::SendNextData()
     waitingForQuorum = true;
     replyQuorum.Clear();
 
+    sendTimesNs[seq_num] = pendingSendTimeNs;
+    uint64_t s = seq_num;
+    transport->Timer(5000, [this, s]() { sendTimesNs.erase(s); });
+
     ::paxosbus::proto::DataMessage dataMsg;
     dataMsg.set_client_id(clientid);
     dataMsg.set_seq_num(seq_num);
@@ -84,6 +88,14 @@ void
 PaxosBusClient::HandleDataReply(const TransportAddress &remote,
                                  const ::paxosbus::proto::DataReplyMessage &msg)
 {
+    // Per-replica RTT: log every reply (incl. late post-quorum ones) using its own send time.
+    auto sendIt = sendTimesNs.find(msg.seq_num());
+    if (sendIt != sendTimesNs.end()) {
+        uint64_t perReplicaRttUs = (NowNs() - sendIt->second) / 1000;
+        Notice("[Client %" PRIu64 "] seq=%" PRIu64 " REPLY from replica=%u  rtt=%" PRIu64 "us",
+               clientid, msg.seq_num(), msg.replica_idx(), perReplicaRttUs);
+    }
+
     if (!waitingForQuorum) {
         return;
     }

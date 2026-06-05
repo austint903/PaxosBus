@@ -9,6 +9,7 @@
 
 #include <cstdint>
 #include <map>
+#include <unordered_map>
 
 namespace specpaxos {
 namespace paxosbus {
@@ -45,6 +46,9 @@ private:
     // rolling latency statistics (microseconds)
     uint64_t committedCount;
     uint64_t totalRttUs;
+
+    // send-time per in-flight seq, so late (post-quorum) replies can still be timed.
+    std::unordered_map<uint64_t, uint64_t> sendTimesNs;
 
     void OnSyncWaitDone();
     void SendNextData();
