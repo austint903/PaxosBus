@@ -5,10 +5,8 @@
 #include "lib/configuration.h"
 #include "lib/transport.h"
 #include "paxosbus/paxosbus-proto.pb.h"
-#include "common/quorumset.h"
 
 #include <cstdint>
-#include <map>
 #include <unordered_map>
 
 namespace specpaxos {
@@ -31,27 +29,28 @@ public:
     void Start();
 
 private:
+    struct InflightEntry {
+        uint64_t sendTimeNs;
+        uint32_t replicaMask;   // bit i set => replica i has replied
+        uint8_t  replyCount;
+    };
+
     specpaxos::Configuration config;
     Transport *transport;
     uint64_t clientid;
     uint64_t interval_ms;
     uint64_t seq_num;
 
-    // quorum state
-    QuorumSet<uint64_t, ::paxosbus::proto::DataReplyMessage> replyQuorum;
-    bool waitingForQuorum;
-    uint64_t pendingSeqNum;
-    uint64_t pendingSendTimeNs;
+    // open-loop tracking: seq -> per-request state
+    std::unordered_map<uint64_t, InflightEntry> inflight;
+    int sendTimerId;
 
-    // rolling latency statistics (microseconds)
+    // rolling latency stats (microseconds)
     uint64_t committedCount;
     uint64_t totalRttUs;
 
-    // send-time per in-flight seq, so late (post-quorum) replies can still be timed.
-    std::unordered_map<uint64_t, uint64_t> sendTimesNs;
-
     void OnSyncWaitDone();
-    void SendNextData();
+    void SendTick();
     void HandleDataReply(const TransportAddress &remote,
                          const ::paxosbus::proto::DataReplyMessage &msg);
     static uint64_t NowNs();

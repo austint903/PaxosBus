@@ -14,9 +14,7 @@ PaxosBusClient::PaxosBusClient(const specpaxos::Configuration &config,
                                 uint64_t interval_ms)
     : config(config), transport(transport),
       clientid(clientid), interval_ms(interval_ms), seq_num(0),
-      replyQuorum(config.QuorumSize()),
-      waitingForQuorum(false), pendingSeqNum(0), pendingSendTimeNs(0),
-      committedCount(0), totalRttUs(0)
+      sendTimerId(0), committedCount(0), totalRttUs(0)
 {
     transport->Register(this, config, -1, -1);
     Notice("[Client %" PRIu64 "] started  interval=%" PRIu64 "ms  replicas=%d  f=%d  quorum=%d (f+1)",
@@ -49,80 +47,63 @@ PaxosBusClient::Start()
 void
 PaxosBusClient::OnSyncWaitDone()
 {
-    Notice("[Client %" PRIu64 "] sync wait done, starting data phase (interval=%" PRIu64 "ms)",
+    Notice("[Client %" PRIu64 "] sync wait done, starting open-loop data phase (interval=%" PRIu64 "ms)",
            clientid, interval_ms);
-    SendNextData();
+    SendTick();
 }
 
 void
-PaxosBusClient::SendNextData()
+PaxosBusClient::SendTick()
 {
-    if (waitingForQuorum) {
-        Warning("[Client %" PRIu64 "] SendNextData called while already waiting for quorum on seq=%"
-                PRIu64 ", ignoring", clientid, pendingSeqNum);
-        return;
-    }
-
     ++seq_num;
-    pendingSeqNum = seq_num;
-    pendingSendTimeNs = NowNs();
-    waitingForQuorum = true;
-    replyQuorum.Clear();
-
-    sendTimesNs[seq_num] = pendingSendTimeNs;
-    uint64_t s = seq_num;
-    transport->Timer(5000, [this, s]() { sendTimesNs.erase(s); });
+    uint64_t now = NowNs();
+    inflight[seq_num] = InflightEntry{ now, 0u, 0 };
 
     ::paxosbus::proto::DataMessage dataMsg;
     dataMsg.set_client_id(clientid);
     dataMsg.set_seq_num(seq_num);
-    dataMsg.set_send_time_ns(pendingSendTimeNs);
+    dataMsg.set_send_time_ns(now);
     dataMsg.set_payload("hello");
 
     transport->SendMessageToAll(this, dataMsg);
-    Notice("[Client %" PRIu64 "] seq=%" PRIu64 " SENT  to %d replicas, waiting for %d (f+1)",
-           clientid, seq_num, config.n, config.QuorumSize());
+
+    sendTimerId = transport->Timer(interval_ms, [this]() { SendTick(); });
 }
 
 void
 PaxosBusClient::HandleDataReply(const TransportAddress &remote,
                                  const ::paxosbus::proto::DataReplyMessage &msg)
 {
-    // Per-replica RTT: log every reply (incl. late post-quorum ones) using its own send time.
-    auto sendIt = sendTimesNs.find(msg.seq_num());
-    if (sendIt != sendTimesNs.end()) {
-        uint64_t perReplicaRttUs = (NowNs() - sendIt->second) / 1000;
-        Notice("[Client %" PRIu64 "] seq=%" PRIu64 " REPLY from replica=%u  rtt=%" PRIu64 "us",
-               clientid, msg.seq_num(), msg.replica_idx(), perReplicaRttUs);
-    }
-
-    if (!waitingForQuorum) {
-        return;
-    }
-    if (msg.seq_num() != pendingSeqNum) {
+    auto it = inflight.find(msg.seq_num());
+    if (it == inflight.end()) {
         return;
     }
 
-    auto *msgs = replyQuorum.AddAndCheckForQuorum(
-        msg.seq_num(), (int)msg.replica_idx(), msg);
+    uint32_t bit = 1u << msg.replica_idx();
+    if (it->second.replicaMask & bit) {
+        return;
+    }
+    it->second.replicaMask |= bit;
+    it->second.replyCount++;
 
-    if (msgs == nullptr) {
+    if (it->second.replyCount < config.QuorumSize()) {
         return;
     }
 
-    uint64_t rttUs = (NowNs() - pendingSendTimeNs) / 1000;
+    uint64_t rttUs = (NowNs() - it->second.sendTimeNs) / 1000;
     committedCount++;
     totalRttUs += rttUs;
     uint64_t avgRttUs = totalRttUs / committedCount;
+    size_t inflightAfter = inflight.size() - 1;
 
     Notice("[Client %" PRIu64 "] seq=%" PRIu64 " COMMITTED"
            "  rtt=%" PRIu64 "us  replies=%d (f+1)"
-           "  avg=%" PRIu64 "us  total_committed=%" PRIu64,
-           clientid, pendingSeqNum, rttUs, config.QuorumSize(),
-           avgRttUs, committedCount);
+           "  avg=%" PRIu64 "us  total_committed=%" PRIu64
+           "  inflight=%zu",
+           clientid, msg.seq_num(), rttUs, config.QuorumSize(),
+           avgRttUs, committedCount, inflightAfter);
 
-    waitingForQuorum = false;
-    transport->Timer(interval_ms, [this]() { SendNextData(); });
+    inflight.erase(it);
 }
 
 void
