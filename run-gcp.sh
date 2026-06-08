@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Required: REPO_URL  (e.g. https://github.com/austint903/PaxosBus.git)
-# Optional: INTERVAL_MS (default 100), DURATION_S (default 60)
+# Optional: REPO_URL (default github.com/austint903/PaxosBus.git),
+#           INTERVAL_MS (default 100), DURATION_S (default 60)
 #
 # Architecture:
 #   pb-controller  (us-east1-c, external IP)  → jump host / orchestrator
@@ -16,7 +16,7 @@ set -euo pipefail
 # pre-installed on GCE VMs and authenticates via the VM's service account;
 # the SA needs compute.osLogin or compute scope).
 
-: "${REPO_URL:?Set REPO_URL=https://github.com/austint903/PaxosBus.git}"
+REPO_URL="${REPO_URL:-https://github.com/austint903/PaxosBus.git}"
 INTERVAL_MS="${INTERVAL_MS:-100}"
 DURATION_S="${DURATION_S:-60}"
 
@@ -24,16 +24,13 @@ CONTROLLER_VM="pb-controller"
 CONTROLLER_ZONE="us-east1-c"
 
 echo "==> gcloud compute instances list (discovering pb-* VMs)"
-mapfile -t INSTANCES < <(gcloud compute instances list \
-  --filter="name~^pb-" \
-  --format="value(name,zone,networkInterfaces[0].networkIP)")
-
 REPLICA0_VM= REPLICA0_ZONE= REPLICA0_IP=  # us-east  (not controller)
 REPLICA1_VM= REPLICA1_ZONE= REPLICA1_IP=  # europe
 REPLICA2_VM= REPLICA2_ZONE= REPLICA2_IP=  # south america
 CLIENT_VM=   CLIENT_ZONE=   CLIENT_IP=    # asia (2 clients)
 
-for line in "${INSTANCES[@]}"; do
+while IFS= read -r line; do
+  [[ -z "$line" ]] && continue
   read -r name zone ip <<< "$line"
   [[ "$name" == "$CONTROLLER_VM" ]] && continue
   case "$zone" in
@@ -42,7 +39,9 @@ for line in "${INSTANCES[@]}"; do
     southamerica*) REPLICA2_VM=$name; REPLICA2_ZONE=$zone; REPLICA2_IP=$ip ;;
     asia*)         CLIENT_VM=$name;   CLIENT_ZONE=$zone;   CLIENT_IP=$ip ;;
   esac
-done
+done < <(gcloud compute instances list \
+  --filter="name~^pb-" \
+  --format="value(name,zone,networkInterfaces[0].networkIP)")
 
 for slot in REPLICA0_VM REPLICA1_VM REPLICA2_VM CLIENT_VM; do
   [[ -n "${!slot}" ]] || { echo "MISSING $slot — check VM zones / names"; exit 1; }
@@ -90,43 +89,63 @@ ssh_to()   { gcloud compute ssh "$1" --zone="$2" --internal-ip --quiet -- "$3"; 
 scp_to()   { gcloud compute scp --zone="$2" --internal-ip --quiet "$3" "$1":"$4"; }
 scp_from() { gcloud compute scp --zone="$2" --internal-ip --quiet "$1":"$3" "$4"; }
 
-echo "[ctrl] Build on $REPLICA0_VM (git pull + incremental make)"
-ssh_to "$REPLICA0_VM" "$REPLICA0_ZONE" "
-  set -e
-  sudo apt-get update -qq
-  sudo apt-get install -y -qq build-essential g++ protobuf-compiler pkg-config \
-       libunwind-dev libssl-dev libprotobuf-dev libevent-dev libgtest-dev git
-  if [[ ! -d ~/PaxosBus ]]; then
-    git clone '$REPO_URL' ~/PaxosBus
-  else
-    git -C ~/PaxosBus pull --ff-only
+echo "[ctrl] Build on controller (only VM with outbound internet)"
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
+export NEEDRESTART_SUSPEND=1
+
+# Wait out unattended-upgrades, which holds the dpkg lock for a few minutes
+# after boot. Without this, apt-get fails on freshly-started VMs.
+for i in $(seq 1 60); do
+  if ! sudo fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock >/dev/null 2>&1; then
+    break
   fi
-  cd ~/PaxosBus && make -j8
-  mkdir -p ~/paxosbus
-  cp paxosbus/paxosbus-replica paxosbus/paxosbus-client ~/paxosbus/
-  chmod +x ~/paxosbus/*
-"
-
-echo "[ctrl] Install runtime libs on R1, R2, CL (parallel)"
-for vm_zone in "$REPLICA1_VM:$REPLICA1_ZONE" "$REPLICA2_VM:$REPLICA2_ZONE" "$CLIENT_VM:$CLIENT_ZONE"; do
-  vm="${vm_zone%%:*}"; zone="${vm_zone##*:}"
-  ssh_to "$vm" "$zone" \
-    "sudo apt-get update -qq && sudo apt-get install -y -qq libprotobuf-dev libevent-dev libunwind-dev libssl-dev" &
+  echo "[ctrl]   waiting for dpkg lock (unattended-upgrades)... ${i}/60"
+  sleep 5
 done
-wait
 
-echo "[ctrl] Pull binaries from builder to controller, then fan out"
-TMPBIN=$(mktemp -d)
-trap 'rm -rf "$TMPBIN"' EXIT
-scp_from "$REPLICA0_VM" "$REPLICA0_ZONE" "paxosbus/paxosbus-replica" "$TMPBIN/"
-scp_from "$REPLICA0_VM" "$REPLICA0_ZONE" "paxosbus/paxosbus-client"  "$TMPBIN/"
+sudo -E apt-get update -qq
+sudo -E apt-get install -y -qq \
+     -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" \
+     build-essential g++ protobuf-compiler pkg-config \
+     libunwind-dev libssl-dev libprotobuf-dev libevent-dev libgtest-dev git
+if [[ ! -d "$HOME/PaxosBus" ]]; then
+  git clone "$REPO_URL" "$HOME/PaxosBus"
+else
+  git -C "$HOME/PaxosBus" pull --ff-only
+fi
+( cd "$HOME/PaxosBus" && make -j8 )
+mkdir -p "$HOME/paxosbus"
+cp "$HOME/PaxosBus/paxosbus/paxosbus-replica" \
+   "$HOME/PaxosBus/paxosbus/paxosbus-client"  "$HOME/paxosbus/"
+chmod +x "$HOME/paxosbus/paxosbus-replica" "$HOME/paxosbus/paxosbus-client"
 
-for vm_zone in "$REPLICA1_VM:$REPLICA1_ZONE" "$REPLICA2_VM:$REPLICA2_ZONE" "$CLIENT_VM:$CLIENT_ZONE"; do
+echo "[ctrl] Collect runtime .so deps for workers (libevent, libprotobuf, ...)"
+rm -rf "$HOME/paxosbus/lib"
+mkdir -p "$HOME/paxosbus/lib"
+ldd "$HOME/paxosbus/paxosbus-replica" "$HOME/paxosbus/paxosbus-client" \
+  | awk '/=>/ && $3 ~ /^\// {print $3}' | sort -u \
+  | while read -r so; do
+      base=$(basename "$so")
+      # Skip glibc / C-runtime libs — must match the worker's kernel + ld-linux
+      case "$base" in
+        libc.so.*|libm.so.*|libdl.so.*|libpthread.so.*|librt.so.*|\
+        libresolv.so.*|libnsl.so.*|libutil.so.*|libgcc_s.so.*|\
+        ld-linux-*.so.*) continue ;;
+      esac
+      cp -L "$so" "$HOME/paxosbus/lib/"
+    done
+ls "$HOME/paxosbus/lib/"
+
+echo "[ctrl] Fan out binaries + libs to R0/R1/R2/CL (no apt on headless VMs)"
+for vm_zone in "$REPLICA0_VM:$REPLICA0_ZONE" "$REPLICA1_VM:$REPLICA1_ZONE" "$REPLICA2_VM:$REPLICA2_ZONE" "$CLIENT_VM:$CLIENT_ZONE"; do
   vm="${vm_zone%%:*}"; zone="${vm_zone##*:}"
-  ssh_to "$vm" "$zone" "mkdir -p ~/paxosbus"
-  scp_to "$vm" "$zone" "$TMPBIN/paxosbus-replica" "paxosbus/"
-  scp_to "$vm" "$zone" "$TMPBIN/paxosbus-client"  "paxosbus/"
-  ssh_to "$vm" "$zone" "chmod +x ~/paxosbus/*"
+  ssh_to "$vm" "$zone" "mkdir -p ~/paxosbus/lib"
+  scp_to "$vm" "$zone" "$HOME/paxosbus/paxosbus-replica" "paxosbus/"
+  scp_to "$vm" "$zone" "$HOME/paxosbus/paxosbus-client"  "paxosbus/"
+  gcloud compute scp --zone="$zone" --internal-ip --quiet --recurse \
+    "$HOME/paxosbus/lib/" "$vm:paxosbus/"
+  ssh_to "$vm" "$zone" "chmod +x ~/paxosbus/paxosbus-replica ~/paxosbus/paxosbus-client"
 done
 
 echo "[ctrl] Generate + distribute paxosbus.conf"
@@ -144,30 +163,57 @@ for vm_zone in "$REPLICA0_VM:$REPLICA0_ZONE" "$REPLICA1_VM:$REPLICA1_ZONE" "$REP
 done
 rm "$CONFFILE"
 
+echo "[ctrl] Pre-warm gcloud SSH (serializes OS Login key propagation)"
+for vm_zone in "$REPLICA0_VM:$REPLICA0_ZONE" "$REPLICA1_VM:$REPLICA1_ZONE" "$REPLICA2_VM:$REPLICA2_ZONE" "$CLIENT_VM:$CLIENT_ZONE"; do
+  vm="${vm_zone%%:*}"; zone="${vm_zone##*:}"
+  ssh_to "$vm" "$zone" "true"
+done
+
 echo "[ctrl] Kill any stale processes"
 for slot in 0 1 2; do
   vm_var="REPLICA${slot}_VM"; zone_var="REPLICA${slot}_ZONE"
-  ssh_to "${!vm_var}" "${!zone_var}" "pkill -f paxosbus-replica || true" &
+  ssh_to "${!vm_var}" "${!zone_var}" "pkill -f '[p]axosbus-replica' || true"
 done
-ssh_to "$CLIENT_VM" "$CLIENT_ZONE" "pkill -f paxosbus-client || true" &
-wait
+ssh_to "$CLIENT_VM" "$CLIENT_ZONE" "pkill -f '[p]axosbus-client' || true"
 sleep 2
 
 echo "[ctrl] Launch replicas (us-east, europe, south-america)"
 for slot in 0 1 2; do
   vm_var="REPLICA${slot}_VM"; zone_var="REPLICA${slot}_ZONE"
-  ssh_to "${!vm_var}" "${!zone_var}" \
-    "rm -f /tmp/paxosbus.log; nohup ~/paxosbus/paxosbus-replica \
-       -c ~/paxosbus/paxosbus.conf -i $slot > /tmp/paxosbus.log 2>&1 &"
+  ssh_to "${!vm_var}" "${!zone_var}" "
+    rm -f /tmp/paxosbus.log
+    cd \$HOME/paxosbus
+    nohup env LD_LIBRARY_PATH=\$HOME/paxosbus/lib ./paxosbus-replica \
+      -c paxosbus.conf -i $slot </dev/null >/tmp/paxosbus.log 2>&1 &
+    disown
+    sleep 1
+    if pgrep -f '[p]axosbus-replica' >/dev/null; then
+      echo '[replica $slot] running, pid='\$(pgrep -f '[p]axosbus-replica')
+    else
+      echo '[replica $slot] NOT RUNNING — startup log:'
+      cat /tmp/paxosbus.log 2>/dev/null || echo '(no log)'
+    fi
+  "
 done
 sleep 3
 
 echo "[ctrl] Launch 2 clients on $CLIENT_VM (asia) — pinging replicas"
 for id in 1 2; do
-  ssh_to "$CLIENT_VM" "$CLIENT_ZONE" \
-    "rm -f /tmp/paxosbus-client-$id.log; nohup ~/paxosbus/paxosbus-client \
-       -c ~/paxosbus/paxosbus.conf -I $id -p $INTERVAL_MS \
-       > /tmp/paxosbus-client-$id.log 2>&1 &"
+  ssh_to "$CLIENT_VM" "$CLIENT_ZONE" "
+    rm -f /tmp/paxosbus-client-$id.log
+    cd \$HOME/paxosbus
+    nohup env LD_LIBRARY_PATH=\$HOME/paxosbus/lib ./paxosbus-client \
+      -c paxosbus.conf -I $id -p $INTERVAL_MS \
+      </dev/null >/tmp/paxosbus-client-$id.log 2>&1 &
+    disown
+    sleep 1
+    if pgrep -f '[p]axosbus-client.*-I $id' >/dev/null; then
+      echo '[client $id] running'
+    else
+      echo '[client $id] NOT RUNNING — startup log:'
+      cat /tmp/paxosbus-client-$id.log 2>/dev/null || echo '(no log)'
+    fi
+  "
 done
 
 echo ""
@@ -184,19 +230,21 @@ echo "----------------------------------------------------------------"
 echo "[ctrl] Stopping replicas + clients"
 for slot in 0 1 2; do
   vm_var="REPLICA${slot}_VM"; zone_var="REPLICA${slot}_ZONE"
-  ssh_to "${!vm_var}" "${!zone_var}" "pkill -f paxosbus-replica || true" &
+  ssh_to "${!vm_var}" "${!zone_var}" "pkill -f '[p]axosbus-replica' || true"
 done
-ssh_to "$CLIENT_VM" "$CLIENT_ZONE" "pkill -f paxosbus-client || true" &
-wait
+ssh_to "$CLIENT_VM" "$CLIENT_ZONE" "pkill -f '[p]axosbus-client' || true"
 
 echo "[ctrl] Collecting logs into ~/paxosbus-logs/ on controller"
 rm -rf ~/paxosbus-logs && mkdir -p ~/paxosbus-logs
 for slot in 0 1 2; do
   vm_var="REPLICA${slot}_VM"; zone_var="REPLICA${slot}_ZONE"
-  scp_from "${!vm_var}" "${!zone_var}" "/tmp/paxosbus.log" "$HOME/paxosbus-logs/${!vm_var}.log"
+  scp_from "${!vm_var}" "${!zone_var}" "/tmp/paxosbus.log" "$HOME/paxosbus-logs/${!vm_var}.log" \
+    || echo "  WARN: no /tmp/paxosbus.log on ${!vm_var}"
 done
-scp_from "$CLIENT_VM" "$CLIENT_ZONE" "/tmp/paxosbus-client-1.log" "$HOME/paxosbus-logs/"
-scp_from "$CLIENT_VM" "$CLIENT_ZONE" "/tmp/paxosbus-client-2.log" "$HOME/paxosbus-logs/"
+scp_from "$CLIENT_VM" "$CLIENT_ZONE" "/tmp/paxosbus-client-1.log" "$HOME/paxosbus-logs/" \
+  || echo "  WARN: no /tmp/paxosbus-client-1.log on $CLIENT_VM"
+scp_from "$CLIENT_VM" "$CLIENT_ZONE" "/tmp/paxosbus-client-2.log" "$HOME/paxosbus-logs/" \
+  || echo "  WARN: no /tmp/paxosbus-client-2.log on $CLIENT_VM"
 
 echo ""
 echo "[ctrl] Per-replica RTT summary"
