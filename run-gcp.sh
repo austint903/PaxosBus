@@ -17,7 +17,7 @@ set -euo pipefail
 # the SA needs compute.osLogin or compute scope).
 
 REPO_URL="${REPO_URL:-https://github.com/austint903/PaxosBus.git}"
-INTERVAL_MS="${INTERVAL_MS:-100}"
+INTERVAL_MS="${INTERVAL_MS:-1}"
 DURATION_S="${DURATION_S:-60}"
 
 CONTROLLER_VM="pb-controller"
@@ -217,14 +217,25 @@ for id in 1 2; do
 done
 
 echo ""
-echo "[ctrl] Live tail of client 1 (running for $((DURATION_S + 6))s)"
+echo "[ctrl] Live tail of all replicas + clients (running for $((DURATION_S + 6))s)"
 echo "----------------------------------------------------------------"
-gcloud compute ssh "$CLIENT_VM" --zone="$CLIENT_ZONE" --internal-ip --quiet \
-  -- "tail -f /tmp/paxosbus-client-1.log" &
-TAIL_PID=$!
+TAIL_PIDS=()
+for slot in 0 1 2; do
+  vm_var="REPLICA${slot}_VM"; zone_var="REPLICA${slot}_ZONE"
+  gcloud compute ssh "${!vm_var}" --zone="${!zone_var}" --internal-ip --quiet \
+    -- "tail -f /tmp/paxosbus.log | sed -u 's/^/[r${slot}] /'" &
+  TAIL_PIDS+=($!)
+done
+for id in 1 2; do
+  gcloud compute ssh "$CLIENT_VM" --zone="$CLIENT_ZONE" --internal-ip --quiet \
+    -- "tail -f /tmp/paxosbus-client-${id}.log | sed -u 's/^/[c${id}] /'" &
+  TAIL_PIDS+=($!)
+done
 sleep $((DURATION_S + 6))
-kill "$TAIL_PID" 2>/dev/null || true
-wait "$TAIL_PID" 2>/dev/null || true
+for pid in "${TAIL_PIDS[@]}"; do
+  kill "$pid" 2>/dev/null || true
+done
+wait 2>/dev/null || true
 
 echo "----------------------------------------------------------------"
 echo "[ctrl] Stopping replicas + clients"
