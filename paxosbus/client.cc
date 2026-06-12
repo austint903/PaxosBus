@@ -11,14 +11,23 @@ namespace paxosbus {
 PaxosBusClient::PaxosBusClient(const specpaxos::Configuration &config,
                                 Transport *transport,
                                 uint64_t clientid,
-                                uint64_t interval_ms)
+                                uint64_t interval_ms,
+                                uint64_t resend_ms)
     : config(config), transport(transport),
-      clientid(clientid), interval_ms(interval_ms), seq_num(0),
-      sendTimerId(0), committedCount(0), totalRttUs(0)
+      clientid(clientid), interval_ms(interval_ms), resend_ms(resend_ms),
+      seq_num(0), app_req_id(0),
+      sendTimerId(0), nextSendNs(0),
+      committedCount(0), totalRttUs(0), resendCount(0),
+      winSent(0), winCommitted(0), winResends(0), winRttSumUs(0)
 {
     transport->Register(this, config, -1, -1);
-    Notice("[Client %" PRIu64 "] started  interval=%" PRIu64 "ms  replicas=%d  f=%d  quorum=%d (f+1)",
-           clientid, interval_ms, config.n, config.f, config.QuorumSize());
+    Notice("[Client %" PRIu64 "] started  interval=%" PRIu64 "ms  replicas=%d  f=%d  quorum=%d (f+1, must include leader)%s",
+           clientid, interval_ms, config.n, config.f, config.QuorumSize(),
+           resend_ms ? "  resend=on" : "");
+    if (resend_ms) {
+        Notice("[Client %" PRIu64 "] resend-on-no-quorum timeout=%" PRIu64 "ms",
+               clientid, resend_ms);
+    }
 }
 
 uint64_t
@@ -49,25 +58,96 @@ PaxosBusClient::OnSyncWaitDone()
 {
     Notice("[Client %" PRIu64 "] sync wait done, starting open-loop data phase (interval=%" PRIu64 "ms)",
            clientid, interval_ms);
+    nextSendNs = NowNs();
+    transport->Timer(1000, [this]() { OnStatsTimer(); });
     SendTick();
 }
 
 void
 PaxosBusClient::SendTick()
 {
-    ++seq_num;
+    // Each tick is a new logical request occupying the next slot. Send every
+    // message whose absolute deadline has passed (catch-up), so late timer
+    // dispatch produces a small burst instead of a permanently lower rate.
     uint64_t now = NowNs();
-    inflight[seq_num] = InflightEntry{ now, 0u, 0 };
+    while (now >= nextSendNs) {
+        SendData(++seq_num, ++app_req_id, 0, 1);
+        nextSendNs += interval_ms * 1000000ULL;
+        now = NowNs();
+    }
+    uint64_t delay_ms = (nextSendNs - now) / 1000000ULL;
+    if (delay_ms == 0) {
+        delay_ms = 1;
+    }
+    sendTimerId = transport->Timer(delay_ms, [this]() { SendTick(); });
+}
+
+void
+PaxosBusClient::SendData(uint64_t seq, uint64_t appReqId,
+                         uint64_t firstSendNs, uint32_t attempts)
+{
+    uint64_t now = NowNs();
+    InflightEntry e{ now, firstSendNs ? firstSendNs : now,
+                     0u, 0, appReqId, attempts, 0 };
 
     ::paxosbus::proto::DataMessage dataMsg;
     dataMsg.set_client_id(clientid);
-    dataMsg.set_seq_num(seq_num);
+    dataMsg.set_seq_num(seq);
     dataMsg.set_send_time_ns(now);
     dataMsg.set_payload("hello");
+    dataMsg.set_app_req_id(appReqId);
 
     transport->SendMessageToAll(this, dataMsg);
+    winSent++;
 
-    sendTimerId = transport->Timer(interval_ms, [this]() { SendTick(); });
+    // Arm the per-seq quorum timeout. If the slot is NoOp'd (no quorum), we
+    // resend the same logical request at a fresh slot.
+    if (resend_ms) {
+        e.resendTimerId = transport->Timer(resend_ms,
+                                           [this, seq]() { OnResendTimeout(seq); });
+    }
+    inflight[seq] = e;
+}
+
+void
+PaxosBusClient::OnResendTimeout(uint64_t seq)
+{
+    auto it = inflight.find(seq);
+    if (it == inflight.end()) {
+        return;  // already committed
+    }
+    uint64_t appReqId    = it->second.appReqId;
+    uint64_t firstSendNs = it->second.firstSendTimeNs;
+    uint32_t attempts    = it->second.attempts;
+    // Abandon the old slot (presumed NoOp'd, or the leader's reply was lost:
+    // either way no leader-inclusive quorum) and resend the same logical
+    // request at a brand-new slot.
+    inflight.erase(it);
+
+    uint64_t newSeq = ++seq_num;
+    resendCount++;
+    winResends++;
+    Notice("[Client %" PRIu64 "] NO-QUORUM seq=%" PRIu64 " app_req=%" PRIu64
+           "  resending as seq=%" PRIu64 "  attempt=%u  total_resends=%" PRIu64,
+           clientid, seq, appReqId, newSeq, attempts + 1, resendCount);
+
+    SendData(newSeq, appReqId, firstSendNs, attempts + 1);
+}
+
+void
+PaxosBusClient::OnStatsTimer()
+{
+    if (winSent || winCommitted || winResends) {
+        uint64_t winAvgUs = winCommitted ? winRttSumUs / winCommitted : 0;
+        uint64_t cumAvgUs = committedCount ? totalRttUs / committedCount : 0;
+        Notice("[Client %" PRIu64 "] 1s: sent=%" PRIu64 " committed=%" PRIu64
+               " resends=%" PRIu64 " inflight=%zu rtt_avg=%" PRIu64 "us"
+               "  cumulative: committed=%" PRIu64 " rtt_avg=%" PRIu64 "us",
+               clientid, winSent, winCommitted, winResends, inflight.size(),
+               winAvgUs, committedCount, cumAvgUs);
+        winSent = winCommitted = winResends = winRttSumUs = 0;
+    }
+    transport->Timer(1000, [this]() { OnStatsTimer(); });
 }
 
 void
@@ -86,22 +166,36 @@ PaxosBusClient::HandleDataReply(const TransportAddress &remote,
     it->second.replicaMask |= bit;
     it->second.replyCount++;
 
-    if (it->second.replyCount < config.QuorumSize()) {
+    uint64_t now = NowNs();
+    // Per-replica RTT measurement line (one per first reply from each replica;
+    // run-gcp.sh's summary and analyze-logs.py both parse this format).
+    Notice("[Client %" PRIu64 "] REPLY from replica=%u  rtt=%" PRIu64 "us  seq=%" PRIu64,
+           clientid, msg.replica_idx(),
+           (now - it->second.sendTimeNs) / 1000, msg.seq_num());
+
+    // Commit requires f+1 replies INCLUDING the leader's (as in NOPaxos): the
+    // leader's log is authoritative during gap agreement, so a quorum without
+    // it could later be overwritten by a NoOp commit.
+    int leaderIdx = config.GetLeaderIndex(msg.view_id());
+    if (it->second.replyCount < config.QuorumSize() ||
+        !(it->second.replicaMask & (1u << leaderIdx))) {
         return;
     }
 
-    uint64_t rttUs = (NowNs() - it->second.sendTimeNs) / 1000;
+    uint64_t rttUs   = (now - it->second.sendTimeNs) / 1000;
+    uint64_t totalUs = (now - it->second.firstSendTimeNs) / 1000;
+    if (it->second.resendTimerId != 0) {
+        transport->CancelTimer(it->second.resendTimerId);
+    }
     committedCount++;
     totalRttUs += rttUs;
-    uint64_t avgRttUs = totalRttUs / committedCount;
-    size_t inflightAfter = inflight.size() - 1;
+    winCommitted++;
+    winRttSumUs += rttUs;
 
-    Notice("[Client %" PRIu64 "] seq=%" PRIu64 " COMMITTED"
-           "  rtt=%" PRIu64 "us  replies=%d (f+1)"
-           "  avg=%" PRIu64 "us  total_committed=%" PRIu64
-           "  inflight=%zu",
-           clientid, msg.seq_num(), rttUs, config.QuorumSize(),
-           avgRttUs, committedCount, inflightAfter);
+    Notice("[Client %" PRIu64 "] COMMITTED seq=%" PRIu64 " app_req=%" PRIu64
+           " rtt=%" PRIu64 "us total=%" PRIu64 "us attempts=%u",
+           clientid, msg.seq_num(), it->second.appReqId,
+           rttUs, totalUs, it->second.attempts);
 
     inflight.erase(it);
 }

@@ -11,10 +11,11 @@ static void
 Usage(const char *prog)
 {
     fprintf(stderr,
-            "usage: %s -c <config-file> -I <client-id> [-p <interval-ms>]\n"
+            "usage: %s -c <config-file> -I <client-id> [-p <interval-ms>] [-t <resend-ms>]\n"
             "  -c  path to replica config file\n"
             "  -I  client ID (positive integer, unique per client)\n"
-            "  -p  message interval in milliseconds (default: 1)\n",
+            "  -p  message interval in milliseconds (default: 1)\n"
+            "  -t  resend-on-no-quorum timeout in ms (default: 0 = disabled)\n",
             prog);
     exit(1);
 }
@@ -25,9 +26,10 @@ main(int argc, char **argv)
     const char *configPath = nullptr;
     uint64_t clientid    = 0;
     uint64_t interval_ms = 1;
+    uint64_t resend_ms   = 0;
 
     int opt;
-    while ((opt = getopt(argc, argv, "c:I:p:")) != -1) {
+    while ((opt = getopt(argc, argv, "c:I:p:t:")) != -1) {
         switch (opt) {
         case 'c': configPath = optarg; break;
         case 'I':
@@ -50,6 +52,16 @@ main(int argc, char **argv)
             }
             break;
         }
+        case 't':
+        {
+            char *end;
+            resend_ms = strtoull(optarg, &end, 10);
+            if (*end != '\0') {
+                fprintf(stderr, "-t requires a non-negative integer (milliseconds)\n");
+                Usage(argv[0]);
+            }
+            break;
+        }
         default: Usage(argv[0]);
         }
     }
@@ -64,7 +76,7 @@ main(int argc, char **argv)
     specpaxos::Configuration config(configStream);
 
     UDPTransport transport(0, 0, 0, nullptr);
-    specpaxos::paxosbus::PaxosBusClient client(config, &transport, clientid, interval_ms);
+    specpaxos::paxosbus::PaxosBusClient client(config, &transport, clientid, interval_ms, resend_ms);
     transport.Timer(0, [&]() { client.Start(); });
     transport.Run();
     return 0;
