@@ -12,7 +12,8 @@ Usage(const char *prog)
 {
     fprintf(stderr,
             "usage: %s -c <config-file> -i <replica-index>"
-            " [-g] [-d <drop-mod>] [-N <noop-mod>] [-D <delta-ms>] [-R <retry-ms>]\n"
+            " [-g] [-d <drop-mod>] [-N <noop-mod>] [-D <delta-ms>] [-R <retry-ms>] [-l <label>]\n"
+            "  -l <label>    location label shown in every log line, e.g. us-east1\n"
             "  -g            enable gap-agreement mode (default: normal processing)\n"
             "  -d <mod>      non-leaders drop (seq+idx) %% mod == 0 (recover-from-leader; default 2)\n"
             "  -N <mod>      ALL replicas drop seq %% mod == 0 (NoOp path; default 0 = off)\n"
@@ -32,9 +33,10 @@ main(int argc, char **argv)
     uint64_t noopMod = 0;
     uint64_t deltaMs = 10;
     uint64_t gapRetryMs = 100;
+    const char *label = "";
 
     int opt;
-    while ((opt = getopt(argc, argv, "c:i:gd:N:D:R:")) != -1) {
+    while ((opt = getopt(argc, argv, "c:i:gd:N:D:R:l:")) != -1) {
         switch (opt) {
         case 'c': configPath = optarg; break;
         case 'i':
@@ -49,6 +51,7 @@ main(int argc, char **argv)
         case 'N': noopMod = strtoull(optarg, nullptr, 10); break;
         case 'D': deltaMs = strtoull(optarg, nullptr, 10); break;
         case 'R': gapRetryMs = strtoull(optarg, nullptr, 10); break;
+        case 'l': label = optarg; break;
         default: Usage(argv[0]);
         }
     }
@@ -70,7 +73,7 @@ main(int argc, char **argv)
     UDPTransport transport(0, 0, 0, nullptr);
     specpaxos::paxosbus::PaxosBusReplica replica(config, index, &transport,
                                                  gapEnabled, dropMod, noopMod,
-                                                 deltaMs, gapRetryMs);
+                                                 deltaMs, gapRetryMs, label);
     transport.Run();
     return 0;
 }

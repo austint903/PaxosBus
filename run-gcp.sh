@@ -180,11 +180,12 @@ sleep 2
 echo "[ctrl] Launch replicas (us-east, europe, south-america)"
 for slot in 0 1 2; do
   vm_var="REPLICA${slot}_VM"; zone_var="REPLICA${slot}_ZONE"
+  region="${!zone_var}"; region="${region%-*}"   # us-east1-d -> us-east1
   ssh_to "${!vm_var}" "${!zone_var}" "
     rm -f /tmp/paxosbus.log
     cd \$HOME/paxosbus
     nohup env LD_LIBRARY_PATH=\$HOME/paxosbus/lib ./paxosbus-replica \
-      -c paxosbus.conf -i $slot </dev/null >/tmp/paxosbus.log 2>&1 &
+      -c paxosbus.conf -i $slot -l $region </dev/null >/tmp/paxosbus.log 2>&1 &
     disown
     sleep 1
     if pgrep -f '[p]axosbus-replica' >/dev/null; then
@@ -198,12 +199,13 @@ done
 sleep 3
 
 echo "[ctrl] Launch 2 clients on $CLIENT_VM (asia) — pinging replicas"
+CLIENT_REGION="${CLIENT_ZONE%-*}"   # asia-east1-c -> asia-east1
 for id in 1 2; do
   ssh_to "$CLIENT_VM" "$CLIENT_ZONE" "
     rm -f /tmp/paxosbus-client-$id.log
     cd \$HOME/paxosbus
     nohup env LD_LIBRARY_PATH=\$HOME/paxosbus/lib ./paxosbus-client \
-      -c paxosbus.conf -I $id -p $INTERVAL_MS \
+      -c paxosbus.conf -I $id -p $INTERVAL_MS -l $CLIENT_REGION \
       </dev/null >/tmp/paxosbus-client-$id.log 2>&1 &
     disown
     sleep 1

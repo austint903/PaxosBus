@@ -12,7 +12,8 @@ PaxosBusClient::PaxosBusClient(const specpaxos::Configuration &config,
                                 Transport *transport,
                                 uint64_t clientid,
                                 uint64_t interval_ms,
-                                uint64_t resend_ms)
+                                uint64_t resend_ms,
+                                const std::string &label)
     : config(config), transport(transport),
       clientid(clientid), interval_ms(interval_ms), resend_ms(resend_ms),
       seq_num(0), app_req_id(0),
@@ -20,13 +21,15 @@ PaxosBusClient::PaxosBusClient(const specpaxos::Configuration &config,
       committedCount(0), totalRttUs(0), resendCount(0),
       winSent(0), winCommitted(0), winResends(0), winRttSumUs(0)
 {
+    self = "Client " + std::to_string(clientid) +
+           (label.empty() ? "" : " " + label);
     transport->Register(this, config, -1, -1);
-    Notice("[Client %" PRIu64 "] started  interval=%" PRIu64 "ms  replicas=%d  f=%d  quorum=%d (f+1, must include leader)%s",
-           clientid, interval_ms, config.n, config.f, config.QuorumSize(),
+    Notice("[%s] started  interval=%" PRIu64 "ms  replicas=%d  f=%d  quorum=%d (f+1, must include leader)%s",
+           self.c_str(), interval_ms, config.n, config.f, config.QuorumSize(),
            resend_ms ? "  resend=on" : "");
     if (resend_ms) {
-        Notice("[Client %" PRIu64 "] resend-on-no-quorum timeout=%" PRIu64 "ms",
-               clientid, resend_ms);
+        Notice("[%s] resend-on-no-quorum timeout=%" PRIu64 "ms",
+               self.c_str(), resend_ms);
     }
 }
 
@@ -48,7 +51,7 @@ PaxosBusClient::Start()
     syncMsg.set_start_delay_ms(5000);
 
     transport->SendMessageToAll(this, syncMsg);
-    Notice("Client %" PRIu64 ": sync sent, waiting 5s before data phase", clientid);
+    Notice("[%s] sync sent, waiting 5s before data phase", self.c_str());
 
     transport->Timer(5000, [this]() { OnSyncWaitDone(); });
 }
@@ -56,8 +59,8 @@ PaxosBusClient::Start()
 void
 PaxosBusClient::OnSyncWaitDone()
 {
-    Notice("[Client %" PRIu64 "] sync wait done, starting open-loop data phase (interval=%" PRIu64 "ms)",
-           clientid, interval_ms);
+    Notice("[%s] sync wait done, starting open-loop data phase (interval=%" PRIu64 "ms)",
+           self.c_str(), interval_ms);
     nextSendNs = NowNs();
     transport->Timer(1000, [this]() { OnStatsTimer(); });
     SendTick();
@@ -127,9 +130,9 @@ PaxosBusClient::OnResendTimeout(uint64_t seq)
     uint64_t newSeq = ++seq_num;
     resendCount++;
     winResends++;
-    Notice("[Client %" PRIu64 "] NO-QUORUM seq=%" PRIu64 " app_req=%" PRIu64
+    Notice("[%s] NO-QUORUM seq=%" PRIu64 " app_req=%" PRIu64
            "  resending as seq=%" PRIu64 "  attempt=%u  total_resends=%" PRIu64,
-           clientid, seq, appReqId, newSeq, attempts + 1, resendCount);
+           self.c_str(), seq, appReqId, newSeq, attempts + 1, resendCount);
 
     SendData(newSeq, appReqId, firstSendNs, attempts + 1);
 }
@@ -140,10 +143,10 @@ PaxosBusClient::OnStatsTimer()
     if (winSent || winCommitted || winResends) {
         uint64_t winAvgUs = winCommitted ? winRttSumUs / winCommitted : 0;
         uint64_t cumAvgUs = committedCount ? totalRttUs / committedCount : 0;
-        Notice("[Client %" PRIu64 "] 1s: sent=%" PRIu64 " committed=%" PRIu64
+        Notice("[%s] 1s: sent=%" PRIu64 " committed=%" PRIu64
                " resends=%" PRIu64 " inflight=%zu rtt_avg=%" PRIu64 "us"
                "  cumulative: committed=%" PRIu64 " rtt_avg=%" PRIu64 "us",
-               clientid, winSent, winCommitted, winResends, inflight.size(),
+               self.c_str(), winSent, winCommitted, winResends, inflight.size(),
                winAvgUs, committedCount, cumAvgUs);
         winSent = winCommitted = winResends = winRttSumUs = 0;
     }
@@ -169,8 +172,8 @@ PaxosBusClient::HandleDataReply(const TransportAddress &remote,
     uint64_t now = NowNs();
     // Per-replica RTT measurement line (one per first reply from each replica;
     // run-gcp.sh's summary and analyze-logs.py both parse this format).
-    Notice("[Client %" PRIu64 "] REPLY from replica=%u  rtt=%" PRIu64 "us  seq=%" PRIu64,
-           clientid, msg.replica_idx(),
+    Notice("[%s] REPLY from replica=%u  rtt=%" PRIu64 "us  seq=%" PRIu64,
+           self.c_str(), msg.replica_idx(),
            (now - it->second.sendTimeNs) / 1000, msg.seq_num());
 
     // Commit requires f+1 replies INCLUDING the leader's (as in NOPaxos): the
@@ -192,9 +195,9 @@ PaxosBusClient::HandleDataReply(const TransportAddress &remote,
     winCommitted++;
     winRttSumUs += rttUs;
 
-    Notice("[Client %" PRIu64 "] COMMITTED seq=%" PRIu64 " app_req=%" PRIu64
+    Notice("[%s] COMMITTED seq=%" PRIu64 " app_req=%" PRIu64
            " rtt=%" PRIu64 "us total=%" PRIu64 "us attempts=%u",
-           clientid, msg.seq_num(), it->second.appReqId,
+           self.c_str(), msg.seq_num(), it->second.appReqId,
            rttUs, totalUs, it->second.attempts);
 
     inflight.erase(it);

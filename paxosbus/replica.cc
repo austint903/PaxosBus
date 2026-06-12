@@ -17,21 +17,24 @@ PaxosBusReplica::PaxosBusReplica(const specpaxos::Configuration &config,
                                   uint64_t dropMod,
                                   uint64_t noopMod,
                                   uint64_t deltaMs,
-                                  uint64_t gapRetryMs)
+                                  uint64_t gapRetryMs,
+                                  const std::string &label)
     : config(config), replicaIdx(replicaIdx), view_id_(0), transport(transport),
       gapEnabled(gapEnabled), dropMod(dropMod), noopMod(noopMod),
       deltaMs(deltaMs), gapRetryMs(gapRetryMs),
       winRecv(0), winDrops(0), winGaps(0), winRecovered(0), winNoops(0),
       winDeltaSumUs(0), winDeltaMinUs(0), winDeltaMaxUs(0)
 {
+    self = "Replica " + std::to_string(replicaIdx) +
+           (label.empty() ? "" : " " + label);
     transport->Register(this, config, 0, replicaIdx);
-    Notice("[Replica %d] started (view=0, f=%d, quorum=%d, leader=%s)",
-           replicaIdx, config.f, config.QuorumSize(),
+    Notice("[%s] started (view=0, f=%d, quorum=%d, leader=%s)",
+           self.c_str(), config.f, config.QuorumSize(),
            AmLeader() ? "yes" : "no");
     if (gapEnabled) {
-        Notice("[Replica %d] gap mode ON: dropMod=%" PRIu64 " noopMod=%" PRIu64
+        Notice("[%s] gap mode ON: dropMod=%" PRIu64 " noopMod=%" PRIu64
                " delta=%" PRIu64 "ms gapRetry=%" PRIu64 "ms",
-               replicaIdx, dropMod, noopMod, deltaMs, gapRetryMs);
+               self.c_str(), dropMod, noopMod, deltaMs, gapRetryMs);
     }
     transport->Timer(1000, [this]() { OnStatsTimer(); });
 }
@@ -126,8 +129,8 @@ PaxosBusReplica::HandleSync(const TransportAddress &remote,
     // (e.g. via the leader) before ever receiving them directly.
     clientAddr[msg.client_id()] = std::unique_ptr<TransportAddress>(remote.clone());
 
-    Notice("[Replica %d] sync from client %" PRIu64 ": interval=%" PRIu64 "ms",
-           replicaIdx, msg.client_id(), msg.interval_ms());
+    Notice("[%s] sync from client %" PRIu64 ": interval=%" PRIu64 "ms",
+           self.c_str(), msg.client_id(), msg.interval_ms());
     // Gap detection is armed only once we have an anchor (first data arrival),
     // so we never declare a gap before the stream has actually started.
 }
@@ -138,8 +141,8 @@ PaxosBusReplica::HandleData(const TransportAddress &remote,
 {
     auto it = clients.find(msg.client_id());
     if (it == clients.end()) {
-        Warning("[Replica %d] data from unsynced client %" PRIu64 ", ignoring",
-                replicaIdx, msg.client_id());
+        Warning("[%s] data from unsynced client %" PRIu64 ", ignoring",
+                self.c_str(), msg.client_id());
         return;
     }
     ClientStream &s = it->second;
@@ -152,9 +155,9 @@ PaxosBusReplica::HandleData(const TransportAddress &remote,
     // Deterministic drop simulation (gap mode only).
     if (gapEnabled && ShouldDrop(msg.seq_num())) {
         winDrops++;
-        Notice("[Replica %d] DROP seq=%" PRIu64 " client=%" PRIu64
+        Notice("[%s] DROP seq=%" PRIu64 " client=%" PRIu64
                " (simulated loss%s)",
-               replicaIdx, msg.seq_num(), msg.client_id(),
+               self.c_str(), msg.seq_num(), msg.client_id(),
                (noopMod > 0 && msg.seq_num() % noopMod == 0) ? ", all replicas"
                                                              : ", this follower");
         return;
@@ -197,10 +200,10 @@ PaxosBusReplica::OnStatsTimer()
 {
     if (winRecv || winDrops || winGaps || winRecovered || winNoops) {
         int64_t deltaAvgUs = winRecv ? winDeltaSumUs / (int64_t)winRecv : 0;
-        Notice("[Replica %d] 1s: received=%" PRIu64 " dropped=%" PRIu64
+        Notice("[%s] 1s: received=%" PRIu64 " dropped=%" PRIu64
                " delta_avg=%+" PRId64 "us delta_min=%+" PRId64 "us delta_max=%+" PRId64 "us"
                " gaps=%" PRIu64 " recovered=%" PRIu64 " noops=%" PRIu64,
-               replicaIdx, winRecv, winDrops,
+               self.c_str(), winRecv, winDrops,
                deltaAvgUs, winDeltaMinUs, winDeltaMaxUs,
                winGaps, winRecovered, winNoops);
         winRecv = winDrops = winGaps = winRecovered = winNoops = 0;
@@ -214,8 +217,8 @@ PaxosBusReplica::ReplyToClient(uint64_t client_id, uint64_t seq)
 {
     auto addr = clientAddr.find(client_id);
     if (addr == clientAddr.end()) {
-        Warning("[Replica %d] no address for client %" PRIu64 ", cannot reply",
-                replicaIdx, client_id);
+        Warning("[%s] no address for client %" PRIu64 ", cannot reply",
+                self.c_str(), client_id);
         return;
     }
 
@@ -227,7 +230,7 @@ PaxosBusReplica::ReplyToClient(uint64_t client_id, uint64_t seq)
     reply.set_replica_idx((uint32_t)replicaIdx);
 
     if (!transport->SendMessage(this, *(addr->second), reply)) {
-        Warning("[Replica %d] failed to send reply for seq=%" PRIu64, replicaIdx, seq);
+        Warning("[%s] failed to send reply for seq=%" PRIu64, self.c_str(), seq);
     }
 }
 
@@ -342,9 +345,9 @@ PaxosBusReplica::SendGapRequest(uint64_t client_id, uint64_t seq)
     if (s.gapRequestNs.find(seq) == s.gapRequestNs.end()) {
         s.gapRequestNs[seq] = now;
         winGaps++;
-        Notice("[Replica %d] GAP detected seq=%" PRIu64 " client=%" PRIu64
+        Notice("[%s] GAP detected seq=%" PRIu64 " client=%" PRIu64
                " -> asking leader %d",
-               replicaIdx, seq, client_id, config.GetLeaderIndex(view_id_));
+               self.c_str(), seq, client_id, config.GetLeaderIndex(view_id_));
     }
 
     ::paxosbus::proto::GapRequestMessage req;
@@ -354,8 +357,8 @@ PaxosBusReplica::SendGapRequest(uint64_t client_id, uint64_t seq)
     req.set_replica_idx((uint32_t)replicaIdx);
 
     if (!transport->SendMessageToReplica(this, config.GetLeaderIndex(view_id_), req)) {
-        Warning("[Replica %d] failed to send GapRequest for seq=%" PRIu64,
-                replicaIdx, seq);
+        Warning("[%s] failed to send GapRequest for seq=%" PRIu64,
+                self.c_str(), seq);
     }
 }
 
@@ -380,8 +383,8 @@ PaxosBusReplica::HandleGapRequest(const TransportAddress &remote,
         reply.set_send_time_ns(it->second.send_time_ns);
         reply.set_payload(it->second.payload);
         if (!transport->SendMessage(this, remote, reply)) {
-            Warning("[Replica %d] failed to send GapReply seq=%" PRIu64,
-                    replicaIdx, msg.seq_num());
+            Warning("[%s] failed to send GapReply seq=%" PRIu64,
+                    self.c_str(), msg.seq_num());
         }
     } else if (it != s.log.end() && it->second.state == LOG_NOOP) {
         // Already committed as NoOp -> (re)send the GapCommit to the requester.
@@ -390,8 +393,8 @@ PaxosBusReplica::HandleGapRequest(const TransportAddress &remote,
         commit.set_seq_num(msg.seq_num());
         commit.set_view_id(view_id_);
         if (!transport->SendMessage(this, remote, commit)) {
-            Warning("[Replica %d] failed to resend GapCommit seq=%" PRIu64,
-                    replicaIdx, msg.seq_num());
+            Warning("[%s] failed to resend GapCommit seq=%" PRIu64,
+                    self.c_str(), msg.seq_num());
         }
     } else {
         // Leader does not have this slot yet. Do NOT escalate to a NoOp here:
@@ -428,9 +431,9 @@ PaxosBusReplica::HandleGapReply(const TransportAddress &remote,
     }
     s.gapLastReqNs.erase(msg.seq_num());
     winRecovered++;
-    Notice("[Replica %d] RECOVERED seq=%" PRIu64 " client=%" PRIu64
+    Notice("[%s] RECOVERED seq=%" PRIu64 " client=%" PRIu64
            " from leader  recovery_latency=%" PRIu64 "us",
-           replicaIdx, msg.seq_num(), msg.client_id(), recovery_us);
+           self.c_str(), msg.seq_num(), msg.client_id(), recovery_us);
 
     ReplyToClient(msg.client_id(), msg.seq_num());
     AdvanceContiguous(msg.client_id());
@@ -453,16 +456,16 @@ PaxosBusReplica::StartGapAgreement(uint64_t client_id, uint64_t seq)
     s.noopStartNs[seq] = NowNs();
     s.gapCommitAcks[seq].clear();
 
-    Notice("[Replica %d] NOOP-START slot=%" PRIu64 " client=%" PRIu64,
-           replicaIdx, seq, client_id);
+    Notice("[%s] NOOP-START slot=%" PRIu64 " client=%" PRIu64,
+           self.c_str(), seq, client_id);
 
     ::paxosbus::proto::GapCommitMessage commit;
     commit.set_client_id(client_id);
     commit.set_seq_num(seq);
     commit.set_view_id(view_id_);
     if (!transport->SendMessageToAll(this, commit)) {
-        Warning("[Replica %d] failed to broadcast GapCommit seq=%" PRIu64,
-                replicaIdx, seq);
+        Warning("[%s] failed to broadcast GapCommit seq=%" PRIu64,
+                self.c_str(), seq);
     }
 }
 
@@ -480,9 +483,9 @@ PaxosBusReplica::HandleGapCommit(const TransportAddress &remote,
     s.gapRequestNs.erase(msg.seq_num());
     s.gapLastReqNs.erase(msg.seq_num());
 
-    Notice("[Replica %d] GapCommit slot=%" PRIu64 " client=%" PRIu64
+    Notice("[%s] GapCommit slot=%" PRIu64 " client=%" PRIu64
            " -> marked NOOP",
-           replicaIdx, msg.seq_num(), msg.client_id());
+           self.c_str(), msg.seq_num(), msg.client_id());
 
     AdvanceContiguous(msg.client_id());
 
@@ -492,8 +495,8 @@ PaxosBusReplica::HandleGapCommit(const TransportAddress &remote,
     reply.set_view_id(view_id_);
     reply.set_replica_idx((uint32_t)replicaIdx);
     if (!transport->SendMessage(this, remote, reply)) {
-        Warning("[Replica %d] failed to send GapCommitReply seq=%" PRIu64,
-                replicaIdx, msg.seq_num());
+        Warning("[%s] failed to send GapCommitReply seq=%" PRIu64,
+                self.c_str(), msg.seq_num());
     }
 }
 
@@ -516,9 +519,9 @@ PaxosBusReplica::HandleGapCommitReply(const TransportAddress &remote,
     if ((int)s.gapCommitAcks[msg.seq_num()].size() >= config.QuorumSize() - 1) {
         uint64_t noop_us = (NowNs() - sit->second) / 1000;
         winNoops++;
-        Notice("[Replica %d] NOOP-DURABLE slot=%" PRIu64 " client=%" PRIu64
+        Notice("[%s] NOOP-DURABLE slot=%" PRIu64 " client=%" PRIu64
                "  noop_latency=%" PRIu64 "us  quorum=%d (f+1)",
-               replicaIdx, msg.seq_num(), msg.client_id(), noop_us,
+               self.c_str(), msg.seq_num(), msg.client_id(), noop_us,
                config.QuorumSize());
         s.noopStartNs.erase(sit);
         s.gapCommitAcks.erase(msg.seq_num());

@@ -26,7 +26,7 @@ DOCKER_TS = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+)Z?\s+(.*)$")
 # (month is tm_mon, i.e. 0-based — a quirk of message.cc; only ordering matters)
 NUMERIC_TS = re.compile(r"^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})-(\d{4}) \d+\s+(.*)$")
 
-RE_CLIENT    = re.compile(r"\[Client (\d+)\]")
+RE_CLIENT    = re.compile(r"\[Client (\d+)([^\]]*)\]")
 RE_REPLY     = re.compile(r"REPLY from replica=(\d+)\s+rtt=(\d+)us")
 RE_COMMITTED = re.compile(r"COMMITTED seq=(\d+) app_req=(\d+) rtt=(\d+)us total=(\d+)us attempts=(\d+)")
 RE_NOQUORUM  = re.compile(r"NO-QUORUM seq=(\d+)")
@@ -35,7 +35,7 @@ RE_DROP      = re.compile(r"DROP seq=(\d+)")
 RE_GAP       = re.compile(r"GAP detected seq=(\d+)")
 RE_RECOVERED = re.compile(r"recovery_latency=(\d+)us")
 RE_NOOP      = re.compile(r"noop_latency=(\d+)us")
-RE_REPLICA   = re.compile(r"\[Replica (\d+)\]")
+RE_REPLICA   = re.compile(r"\[Replica (\d+)([^\]]*)\]")
 
 
 def parse_ts(line):
@@ -72,9 +72,9 @@ def fmt_us(us):
 
 def stat_line(label, vals):
     if not vals:
-        return f"    {label:<28} no data"
+        return f"    {label:<38} no data"
     v = sorted(vals)
-    return (f"    {label:<28} n={len(v):<7} avg={fmt_us(sum(v) // len(v)):<10}"
+    return (f"    {label:<38} n={len(v):<7} avg={fmt_us(sum(v) // len(v)):<10}"
             f" p50={fmt_us(pctl(v, 0.50)):<10} p99={fmt_us(pctl(v, 0.99)):<10}"
             f" max={fmt_us(v[-1])}")
 
@@ -104,6 +104,7 @@ def main():
     gaps = {}            # replica -> count
     recoveries = {}      # replica -> [recovery_us]
     noops = []           # [noop_us] (leader only)
+    regions = {}         # replica -> region label (from "-l", if used)
 
     for path in files:
         node = os.path.basename(path)[:-len(".log")]
@@ -142,6 +143,8 @@ def main():
                         sent_per_s.setdefault(cid, []).append(int(m.group(1)))
                 elif rm:
                     rid = int(rm.group(1))
+                    if rm.group(2).strip():
+                        regions[rid] = rm.group(2).strip()
                     if RE_DROP.search(text):
                         drops[rid] = drops.get(rid, 0) + 1
                     elif RE_GAP.search(text):
@@ -164,10 +167,13 @@ def main():
     print(f"Analyzed {len(files)} log files in {logdir}/  "
           f"({len(merged)} lines -> {merged_path})\n")
 
+    def rname(rid):
+        return f"replica {rid} ({regions[rid]})" if rid in regions else f"replica {rid}"
+
     for cid in sorted(set(list(replies) + list(quorum))):
         print(f"== Client {cid} ==")
         for rid in sorted(replies.get(cid, {})):
-            print(stat_line(f"replica {rid} reply RTT", replies[cid][rid]))
+            print(stat_line(f"{rname(rid)} reply RTT", replies[cid][rid]))
         print(stat_line("quorum (COMMITTED) RTT", quorum.get(cid, [])))
         if totals.get(cid):
             print(stat_line("total latency (resent reqs)", totals[cid]))
@@ -182,10 +188,10 @@ def main():
     if drops or gaps or recoveries or noops:
         print("== Gap agreement ==")
         for rid in sorted(set(list(drops) + list(gaps) + list(recoveries))):
-            print(f"    replica {rid}: dropped={drops.get(rid, 0)}"
+            print(f"    {rname(rid)}: dropped={drops.get(rid, 0)}"
                   f"  gaps_detected={gaps.get(rid, 0)}")
             if recoveries.get(rid):
-                print(stat_line(f"replica {rid} recovery latency",
+                print(stat_line(f"{rname(rid)} recovery latency",
                                 recoveries[rid]))
         print(stat_line("NoOp agreement latency", noops))
 

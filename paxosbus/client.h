@@ -7,6 +7,7 @@
 #include "paxosbus/paxosbus-proto.pb.h"
 
 #include <cstdint>
+#include <string>
 #include <unordered_map>
 
 namespace specpaxos {
@@ -19,7 +20,8 @@ public:
                    Transport *transport,
                    uint64_t clientid,
                    uint64_t interval_ms,
-                   uint64_t resend_ms = 0);  // 0 disables resend-on-no-quorum
+                   uint64_t resend_ms = 0,   // 0 disables resend-on-no-quorum
+                   const std::string &label = "");
     ~PaxosBusClient() {}
 
     void ReceiveMessage(const TransportAddress &remote,
@@ -43,6 +45,9 @@ private:
     specpaxos::Configuration config;
     Transport *transport;
     uint64_t clientid;
+
+    // Log-line identity, e.g. "Client 1 asia-east1" (label optional).
+    std::string self;
     uint64_t interval_ms;
     uint64_t resend_ms;
     uint64_t seq_num;

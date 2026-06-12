@@ -9,6 +9,7 @@
 #include <map>
 #include <set>
 #include <memory>
+#include <string>
 #include <cstdint>
 
 namespace specpaxos {
@@ -24,7 +25,8 @@ public:
                     uint64_t dropMod = 2,
                     uint64_t noopMod = 0,
                     uint64_t deltaMs = 10,
-                    uint64_t gapRetryMs = 100);
+                    uint64_t gapRetryMs = 100,
+                    const std::string &label = "");
     ~PaxosBusReplica();
 
     void ReceiveMessage(const TransportAddress &remote,
@@ -81,6 +83,9 @@ private:
     int replicaIdx;
     uint64_t view_id_;
     Transport *transport;
+
+    // Log-line identity, e.g. "Replica 1 europe-north1" (label optional).
+    std::string self;
 
     // Gap-mode configuration.
     bool     gapEnabled;

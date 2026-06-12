@@ -11,11 +11,12 @@ static void
 Usage(const char *prog)
 {
     fprintf(stderr,
-            "usage: %s -c <config-file> -I <client-id> [-p <interval-ms>] [-t <resend-ms>]\n"
+            "usage: %s -c <config-file> -I <client-id> [-p <interval-ms>] [-t <resend-ms>] [-l <label>]\n"
             "  -c  path to replica config file\n"
             "  -I  client ID (positive integer, unique per client)\n"
             "  -p  message interval in milliseconds (default: 1)\n"
-            "  -t  resend-on-no-quorum timeout in ms (default: 0 = disabled)\n",
+            "  -t  resend-on-no-quorum timeout in ms (default: 0 = disabled)\n"
+            "  -l  location label shown in every log line, e.g. asia-east1\n",
             prog);
     exit(1);
 }
@@ -27,9 +28,10 @@ main(int argc, char **argv)
     uint64_t clientid    = 0;
     uint64_t interval_ms = 1;
     uint64_t resend_ms   = 0;
+    const char *label    = "";
 
     int opt;
-    while ((opt = getopt(argc, argv, "c:I:p:t:")) != -1) {
+    while ((opt = getopt(argc, argv, "c:I:p:t:l:")) != -1) {
         switch (opt) {
         case 'c': configPath = optarg; break;
         case 'I':
@@ -62,6 +64,7 @@ main(int argc, char **argv)
             }
             break;
         }
+        case 'l': label = optarg; break;
         default: Usage(argv[0]);
         }
     }
@@ -76,7 +79,8 @@ main(int argc, char **argv)
     specpaxos::Configuration config(configStream);
 
     UDPTransport transport(0, 0, 0, nullptr);
-    specpaxos::paxosbus::PaxosBusClient client(config, &transport, clientid, interval_ms, resend_ms);
+    specpaxos::paxosbus::PaxosBusClient client(config, &transport, clientid,
+                                               interval_ms, resend_ms, label);
     transport.Timer(0, [&]() { client.Start(); });
     transport.Run();
     return 0;
