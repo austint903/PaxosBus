@@ -4,8 +4,8 @@
 Usage:
     ./analyze-logs.py [logdir]
 
-logdir defaults to the newest logs/local-run-* directory if any exist,
-otherwise ./logs (where run-gcp.sh deposits the per-VM logs).
+logdir defaults to the newest run directory (by mtime) under logs/local/ and
+logs/gcp/, where run-paxosbus.sh and run-gcp.sh archive one directory per run.
 
 Per-node raw logs are left untouched (each file is one node's view; cross-VM
 wall clocks are only NTP-synced, so a merged ordering is approximate). This
@@ -83,8 +83,9 @@ def main():
     if len(sys.argv) > 1:
         logdir = sys.argv[1]
     else:
-        runs = sorted(glob.glob("logs/local-run-*"))
-        logdir = runs[-1] if runs else "logs"
+        runs = (glob.glob("logs/local/local-run-*") +
+                glob.glob("logs/gcp/gcp-run-*"))
+        logdir = max(runs, key=os.path.getmtime) if runs else "logs"
     if not os.path.isdir(logdir):
         sys.exit(f"error: {logdir} is not a directory")
 

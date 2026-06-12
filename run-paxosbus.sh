@@ -131,7 +131,7 @@ fi
 echo ""
 
 # ── Per-run log directory (durable copy of every node's stream) ──────────────
-RUN_LOG_DIR="$SCRIPT_DIR/logs/local-run-$(date +%Y%m%d-%H%M%S)"
+RUN_LOG_DIR="$SCRIPT_DIR/logs/local/local-run-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$RUN_LOG_DIR"
 {
     echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"

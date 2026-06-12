@@ -291,9 +291,18 @@ gcloud compute ssh "$CONTROLLER_VM" --zone="$CONTROLLER_ZONE" --quiet -- "
   bash ~/orchestrator.sh
 "
 
-echo "==> Copying logs from $CONTROLLER_VM to ./logs/"
-mkdir -p ./logs
+# Each run is archived in its own directory so results are never overwritten.
+RUN_LOG_DIR="./logs/gcp/gcp-run-$(date +%Y%m%d-%H%M%S)"
+echo "==> Copying logs from $CONTROLLER_VM to $RUN_LOG_DIR/"
+mkdir -p "$RUN_LOG_DIR"
 gcloud compute scp --zone="$CONTROLLER_ZONE" --quiet --recurse \
-  "$CONTROLLER_VM":~/paxosbus-logs/. ./logs/
+  "$CONTROLLER_VM":~/paxosbus-logs/. "$RUN_LOG_DIR/"
+{
+  echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "git_commit=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  echo "interval_ms=$INTERVAL_MS"
+  echo "duration_s=$DURATION_S"
+  echo "mode=normal"
+} > "$RUN_LOG_DIR/run-meta.txt"
 
-echo "==> Done. VMs left running. Logs in ./logs/"
+echo "==> Done. VMs left running. Logs in $RUN_LOG_DIR/"
