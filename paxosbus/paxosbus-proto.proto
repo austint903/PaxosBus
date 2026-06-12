@@ -14,6 +14,7 @@ message DataMessage {
     required uint64 seq_num      = 2;
     required uint64 send_time_ns = 3;
     required bytes  payload      = 4;
+    optional uint64 app_req_id   = 5;  // stable id across resends (resend lands at new seq)
 }
 
 // Phase 2: replica acknowledgement of a DataMessage (unicast back to client)
@@ -23,4 +24,41 @@ message DataReplyMessage {
     required uint64 view_id      = 3;
     required uint64 log_slot_num = 4;
     required uint32 replica_idx  = 5;
+}
+
+// ── Gap agreement (inter-replica) ───────────────────────────────────────────
+// A slot is identified by (client_id, seq_num); seq_num doubles as the log slot.
+
+// Follower -> leader: "I am missing this slot, send it to me."
+message GapRequestMessage {
+    required uint64 client_id   = 1;
+    required uint64 seq_num     = 2;
+    required uint64 view_id     = 3;
+    required uint32 replica_idx = 4;
+}
+
+// Leader -> requesting follower. found=false means the leader is also missing it.
+message GapReplyMessage {
+    required uint64 client_id    = 1;
+    required uint64 seq_num      = 2;
+    required uint64 view_id      = 3;
+    required uint32 replica_idx  = 4;
+    required bool   found        = 5;
+    optional uint64 send_time_ns = 6;
+    optional bytes  payload      = 7;
+}
+
+// Leader -> all: commit this slot as a NoOp (gap agreement).
+message GapCommitMessage {
+    required uint64 client_id = 1;
+    required uint64 seq_num   = 2;
+    required uint64 view_id   = 3;
+}
+
+// Follower -> leader: acknowledges the NoOp commit for durability counting.
+message GapCommitReplyMessage {
+    required uint64 client_id   = 1;
+    required uint64 seq_num     = 2;
+    required uint64 view_id     = 3;
+    required uint32 replica_idx = 4;
 }
